@@ -9,6 +9,7 @@ import static de.buttercookie.simbadroid.util.StyledTextUtils.getStyledText;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
 import java.net.InetAddress;
 import android.os.Build;
@@ -17,7 +18,9 @@ import android.os.IBinder;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
+import android.widget.CompoundButton;
 import android.widget.Spinner;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -46,6 +49,7 @@ import de.buttercookie.simbadroid.service.SmbServiceStatusLiveData;
 public class MainActivity extends AppCompatActivity {
     private static final String PREFS_NAME = "SimbaDroidPrefs";
     private static final String PREF_KEY_IP_ADDRESS = "selectedIpAddress";
+    private static final String PREF_KEY_START_ON_BOOT = "start_on_boot";
 
     private ActivityMainBinding binding;
 
@@ -82,7 +86,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 String selectedIp = (String) parent.getItemAtPosition(position);
-                SharedPreferences.Editor editor = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
+                Context storageContext = createDeviceProtectedStorageContext();
+                SharedPreferences.Editor editor = storageContext.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
                 editor.putString(PREF_KEY_IP_ADDRESS, selectedIp);
                 editor.apply();
             }
@@ -106,6 +111,22 @@ public class MainActivity extends AppCompatActivity {
         SmbServiceStatusLiveData.get().observe(this, status -> {
             updateButtonState(status);
             updateStatusText(status);
+        });
+
+        Context storageContext = createDeviceProtectedStorageContext();
+        SharedPreferences prefs = storageContext.getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        Switch startOnBootSwitch = binding.startOnBootSwitch;
+        startOnBootSwitch.setChecked(prefs.getBoolean(PREF_KEY_START_ON_BOOT, false));
+        startOnBootSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            SharedPreferences.Editor editor = storageContext.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
+            editor.putBoolean(PREF_KEY_START_ON_BOOT, isChecked);
+            editor.apply();
+
+            ComponentName receiver = new ComponentName(this, BootReceiver.class);
+            PackageManager pm = getPackageManager();
+            pm.setComponentEnabledSetting(receiver,
+                    isChecked ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                    PackageManager.DONT_KILL_APP);
         });
     }
 
@@ -190,7 +211,8 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (mIpAddressAdapter.getCount() > 0) {
-            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            Context storageContext = createDeviceProtectedStorageContext();
+            SharedPreferences prefs = storageContext.getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
             String savedIp = prefs.getString(PREF_KEY_IP_ADDRESS, null);
             if (savedIp != null) {
                 int position = mIpAddressAdapter.getPosition(savedIp);
