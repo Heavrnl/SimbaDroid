@@ -23,7 +23,7 @@ public class IntentReceiverActivity extends Activity {
         final String action = intent.getAction();
 
         if (ACTION_START.equals(action)) {
-            SmbService.startService(this, false);
+            SmbService.startService(this, false, null);
         }
 
         finish();

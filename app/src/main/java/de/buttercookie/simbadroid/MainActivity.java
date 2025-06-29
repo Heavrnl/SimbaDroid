@@ -9,9 +9,15 @@ import static de.buttercookie.simbadroid.util.StyledTextUtils.getStyledText;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import java.net.InetAddress;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -28,6 +34,9 @@ import com.google.android.material.button.MaterialButton;
 
 import org.apache.commons.lang3.StringUtils;
 
+import java.util.List;
+import java.util.Objects;
+
 import de.buttercookie.simbadroid.databinding.ActivityMainBinding;
 import de.buttercookie.simbadroid.permissions.Permissions;
 import de.buttercookie.simbadroid.service.SmbService;
@@ -35,10 +44,14 @@ import de.buttercookie.simbadroid.service.SmbServiceConnection;
 import de.buttercookie.simbadroid.service.SmbServiceStatusLiveData;
 
 public class MainActivity extends AppCompatActivity {
+    private static final String PREFS_NAME = "SimbaDroidPrefs";
+    private static final String PREF_KEY_IP_ADDRESS = "selectedIpAddress";
+
     private ActivityMainBinding binding;
 
     private SmbService mService;
     private boolean mBound = false;
+    private ArrayAdapter<String> mIpAddressAdapter;
     private final SmbServiceConnection mSmbSrvConn = new SmbServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder service) {
@@ -61,6 +74,24 @@ public class MainActivity extends AppCompatActivity {
 
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
+
+        mIpAddressAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item);
+        mIpAddressAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        binding.ipAddressSpinner.setAdapter(mIpAddressAdapter);
+        binding.ipAddressSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String selectedIp = (String) parent.getItemAtPosition(position);
+                SharedPreferences.Editor editor = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
+                editor.putString(PREF_KEY_IP_ADDRESS, selectedIp);
+                editor.apply();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
         binding.toggleService.setOnClickListener(v -> toggleSmbService());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             binding.toggleService.setAllowClickWhenDisabled(true);
@@ -96,20 +127,35 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateButtonState(SmbService.Status status) {
         final MaterialButton button = binding.toggleService;
+        final Spinner spinner = binding.ipAddressSpinner;
+        final TextView spinnerLabel = binding.ipAddressLabel;
 
         if (status.serviceRunning()) {
             button.setText(R.string.button_stop_server);
             button.setIcon(AppCompatResources.getDrawable(this, R.drawable.ic_stop));
             button.setEnabled(true);
+            spinner.setEnabled(false);
+            spinner.setVisibility(View.VISIBLE);
+            spinnerLabel.setVisibility(View.VISIBLE);
         } else {
             button.setText(R.string.button_start_server);
             button.setIcon(AppCompatResources.getDrawable(this, R.drawable.ic_start));
-            button.setEnabled(mBound && mService.isNetworkAvailable());
+            boolean networkAvailable = status.inetAddresses() != null && !status.inetAddresses().isEmpty();
+            button.setEnabled(networkAvailable);
+            spinner.setEnabled(true);
+            if (networkAvailable) {
+                spinner.setVisibility(View.VISIBLE);
+                spinnerLabel.setVisibility(View.VISIBLE);
+            } else {
+                spinner.setVisibility(View.GONE);
+                spinnerLabel.setVisibility(View.GONE);
+            }
         }
     }
 
     private void updateStatusText(SmbService.Status status) {
         final TextView statusText = binding.serviceStatus;
+        updateIpAddressSpinner(status.inetAddresses());
 
         if (!status.serviceRunning()) {
             statusText.setText(R.string.status_server_off);
@@ -124,6 +170,28 @@ public class MainActivity extends AppCompatActivity {
                     status.mdnsAddress(),
                     status.netBiosAddress(),
                     status.ipAddress()));
+        }
+    }
+
+    private void updateIpAddressSpinner(List<InetAddress> addresses) {
+        final Spinner spinner = binding.ipAddressSpinner;
+        mIpAddressAdapter.clear();
+
+        if (addresses != null) {
+            for (InetAddress addr : addresses) {
+                mIpAddressAdapter.add(addr.getHostAddress());
+            }
+        }
+
+        if (mIpAddressAdapter.getCount() > 0) {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            String savedIp = prefs.getString(PREF_KEY_IP_ADDRESS, null);
+            if (savedIp != null) {
+                int position = mIpAddressAdapter.getPosition(savedIp);
+                if (position >= 0) {
+                    spinner.setSelection(position);
+                }
+            }
         }
     }
 
@@ -143,7 +211,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startSmbService() {
-        SmbService.startService(this, true);
+        String selectedIp = (String) binding.ipAddressSpinner.getSelectedItem();
+        if (selectedIp == null) {
+            // This should not happen if the start button is enabled
+            return;
+        }
+        SmbService.startService(this, true, selectedIp);
     }
 
     private void stopSmbService() {

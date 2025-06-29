@@ -137,36 +137,42 @@ public class JLANFileServerConfiguration extends ServerConfiguration {
         }
     }
 
-    void setBindAddress(LinkAddress bindAddress) throws InvalidConfigurationException {
+    void setBindAddress(InetAddress bindAddress) throws InvalidConfigurationException {
         final SMBConfigSection smbConfig =
                 (SMBConfigSection) getConfigSection(SMBConfigSection.SectionName);
 
-        smbConfig.setSMBBindAddress(bindAddress.getAddress());
-        smbConfig.setNetBIOSBindAddress(bindAddress.getAddress());
+        smbConfig.setSMBBindAddress(bindAddress);
+        smbConfig.setNetBIOSBindAddress(bindAddress);
 
         String broadcastAddress = getBroadcastAddress(bindAddress);
         smbConfig.setBroadcastMask(broadcastAddress);
         NetworkSettings.setBroadcastMask(broadcastAddress);
     }
 
-    private static String getBroadcastAddress(LinkAddress address) {
+    private static String getBroadcastAddress(InetAddress address) {
         String broadcastAddress = null;
-        if (address.getAddress() instanceof Inet4Address v4addr) {
+        if (address instanceof Inet4Address v4addr) {
             try {
                 InterfaceAddress ifAddr = convertToInterfaceAddress(v4addr);
-                broadcastAddress = ifAddr.getBroadcast().getHostAddress();
+                if (ifAddr != null && ifAddr.getBroadcast() != null) {
+                    broadcastAddress = ifAddr.getBroadcast().getHostAddress();
+                }
             } catch (SocketException ignored) {}
-        } else if (address.getAddress() instanceof Inet6Address) {
+        } else if (address instanceof Inet6Address) {
             broadcastAddress = "ff02::1";
         }
         return broadcastAddress;
     }
 
     private static InterfaceAddress convertToInterfaceAddress(InetAddress address) throws SocketException {
-        List<InterfaceAddress> interfaceAddresses =
-                NetworkInterface.getByInetAddress(address).getInterfaceAddresses();
-        return interfaceAddresses.stream().reduce((addr1, addr2) ->
-                addr2.getAddress().equals(address) ? addr2 : addr1).get();
+        NetworkInterface networkInterface = NetworkInterface.getByInetAddress(address);
+        if (networkInterface == null) {
+            return null;
+        }
+        return networkInterface.getInterfaceAddresses().stream()
+                .filter(iface -> iface.getAddress().equals(address))
+                .findFirst()
+                .orElse(null);
     }
 
     private static void addShare(DiskInterface diskInterface,

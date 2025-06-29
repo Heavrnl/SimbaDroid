@@ -5,7 +5,7 @@
 package de.buttercookie.simbadroid.jlan;
 
 import android.content.Context;
-import android.net.LinkAddress;
+import java.net.InetAddress;
 
 import com.google.common.util.concurrent.Monitor;
 
@@ -69,7 +69,7 @@ public class JLANFileServer {
         return mStarted;
     }
 
-    public void setBindAddress(LinkAddress address) {
+    public void setBindAddress(InetAddress address) {
         try {
             mCfg.setBindAddress(address);
         } catch (InvalidConfigurationException e) {

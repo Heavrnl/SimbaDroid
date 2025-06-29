@@ -18,7 +18,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
-import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -41,17 +40,24 @@ import org.filesys.smb.TcpipSMB;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Objects;
 
 import de.buttercookie.simbadroid.MainActivity;
 import de.buttercookie.simbadroid.R;
 import de.buttercookie.simbadroid.jlan.JLANFileServer;
 import de.buttercookie.simbadroid.permissions.Permissions;
-import de.buttercookie.simbadroid.util.IpSort;
 import de.buttercookie.simbadroid.util.ThreadUtils;
 
 public class SmbService extends Service {
     private static final String LOGTAG = "SmbService";
+
+    public static final String EXTRA_SELECTED_IP = "de.buttercookie.simbadroid.service.SELECTED_IP";
 
     private static final String NOTIFICATION_CHANNEL = SmbService.class.getName();
     private static final int NOTIFICATION_ID = 1;
@@ -69,7 +75,8 @@ public class SmbService extends Service {
     }
 
     private boolean mRunning = false;
-    private LinkAddress mLinkAddress = null;
+    private List<InetAddress> mInetAddresses = new ArrayList<>();
+    private final List<Network> mNetworks = new ArrayList<>();
 
     private JLANFileServer mServer;
     private PowerManager.WakeLock mWakeLock;
@@ -82,9 +89,11 @@ public class SmbService extends Service {
     private String mMDNSHostname;
     private static final int INITIAL_SERVICE_NAME_SUFFIX = 1;
     private int mServiceNameSuffix = INITIAL_SERVICE_NAME_SUFFIX;
+    private String mSelectedIp;
 
     public record Status(boolean serviceRunning, boolean serverRunning, String mdnsAddress,
-                         String netBiosAddress, String ipAddress) {
+                         String netBiosAddress, String ipAddress,
+                         List<InetAddress> inetAddresses) {
     }
 
     private void setIsRunning(boolean isRunning) {
@@ -94,10 +103,10 @@ public class SmbService extends Service {
         }
     }
 
-    private void setLinkAddress(LinkAddress address) {
-        if (!Objects.equals(mLinkAddress, address)) {
-            mLinkAddress = address;
-            if (address != null) {
+    private void setInetAddresses(List<InetAddress> addresses) {
+        if (!Objects.equals(mInetAddresses, addresses)) {
+            mInetAddresses = addresses;
+            if (addresses != null && !addresses.isEmpty()) {
                 mNetworkTimeoutMs = NETWORK_UNAVAILABLE_TIMEOUT_MS;
             }
             updateServerState();
@@ -106,7 +115,8 @@ public class SmbService extends Service {
 
     private void setMDNSHostname(String hostname) {
         mMDNSHostname = hostname;
-        InetAddress addr = mLinkAddress != null ? mLinkAddress.getAddress() : null;
+        InetAddress addr = mInetAddresses != null && !mInetAddresses.isEmpty() ?
+                mInetAddresses.get(0) : null;
         HostnameBroadcaster.setHostname(addr, hostname);
     }
 
@@ -128,6 +138,9 @@ public class SmbService extends Service {
     @SuppressLint("InlinedApi")
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null) {
+            mSelectedIp = intent.getStringExtra(EXTRA_SELECTED_IP);
+        }
         if (handleAction(intent) || mRunning) {
             return START_NOT_STICKY;
         }
@@ -194,7 +207,7 @@ public class SmbService extends Service {
     }
 
     public boolean isNetworkAvailable() {
-        return mLinkAddress != null;
+        return mInetAddresses != null && !mInetAddresses.isEmpty();
     }
 
     private void updateServerState() {
@@ -212,7 +225,16 @@ public class SmbService extends Service {
 
         if (mRunning && isNetworkAvailable()) {
             Log.d(LOGTAG, "Starting SMB server");
-            mServer.setBindAddress(mLinkAddress);
+            InetAddress bindAddress = mInetAddresses.get(0);
+            if (mSelectedIp != null) {
+                for (InetAddress addr : mInetAddresses) {
+                    if (Objects.equals(addr.getHostAddress(), mSelectedIp)) {
+                        bindAddress = addr;
+                        break;
+                    }
+                }
+            }
+            mServer.setBindAddress(bindAddress);
             mServer.start();
             getSystemService(NotificationManager.class)
                     .notify(NOTIFICATION_ID, getServiceNotification());
@@ -262,34 +284,29 @@ public class SmbService extends Service {
 
     private void monitorNetwork() {
         if (mNetCallback == null) {
-            ConnectivityManager connMgr = getSystemService(ConnectivityManager.class);
+            final ConnectivityManager connMgr = getSystemService(ConnectivityManager.class);
             mNetCallback = new ConnectivityManager.NetworkCallback() {
                 @Override
                 public void onAvailable(@NonNull Network network) {
-                    connMgr.bindProcessToNetwork(network);
-                    LinkProperties props = connMgr.getLinkProperties(network);
-                    if (props != null) {
-                        var sortedAddresses = props.getLinkAddresses().stream()
-                                .filter(address -> address.getAddress() instanceof Inet4Address)
-                                .sorted(new IpSort.LinkAddressComparator(false));
-                        ThreadUtils.postToUiThread(() ->
-                                setLinkAddress(sortedAddresses.findFirst().orElse(null)));
-                    } else {
-                        ThreadUtils.postToUiThread(() -> setLinkAddress(null));
+                    if (!mNetworks.contains(network)) {
+                        mNetworks.add(network);
                     }
+                    updateNetworkAddresses();
                 }
 
                 @Override
                 public void onLost(@NonNull Network network) {
-                    ThreadUtils.postToUiThread(() -> setLinkAddress(null));
-                    connMgr.bindProcessToNetwork(null);
+                    mNetworks.remove(network);
+                    updateNetworkAddresses();
+                }
+
+                @Override
+                public void onLinkPropertiesChanged(@NonNull Network network, @NonNull LinkProperties linkProperties) {
+                    updateNetworkAddresses();
                 }
             };
-            connMgr.requestNetwork(
-                    new NetworkRequest.Builder()
-                            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-                            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).build(),
+            connMgr.registerNetworkCallback(
+                    new NetworkRequest.Builder().build(),
                     mNetCallback
             );
         }
@@ -298,11 +315,32 @@ public class SmbService extends Service {
     private void unmonitorNetwork() {
         if (mNetCallback != null) {
             ConnectivityManager connMgr = getSystemService(ConnectivityManager.class);
-            mLinkAddress = null;
             connMgr.unregisterNetworkCallback(mNetCallback);
-            connMgr.bindProcessToNetwork(null);
             mNetCallback = null;
+            mNetworks.clear();
+            setInetAddresses(new ArrayList<>());
         }
+    }
+
+    private void updateNetworkAddresses() {
+        final List<InetAddress> addresses = new ArrayList<>();
+        try {
+            for (NetworkInterface intf : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (intf.isUp() && !intf.isLoopback()) {
+                    for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
+                        if (addr instanceof Inet4Address) {
+                            addresses.add(addr);
+                        }
+                    }
+                }
+            }
+        } catch (SocketException e) {
+            Log.e(LOGTAG, "Could not get network interfaces", e);
+        }
+        var sortedAddresses = addresses.stream()
+                .sorted(Comparator.comparing(InetAddress::getHostAddress))
+                .toList();
+        ThreadUtils.postToUiThread(() -> setInetAddresses(sortedAddresses));
     }
 
     private void registerNsdService() {
@@ -436,8 +474,12 @@ public class SmbService extends Service {
      * @param promptForPermissions Whether to prompt for the required Android permissions.
      */
     @SuppressLint("InlinedApi")
-    public static void startService(final Context context, final boolean promptForPermissions) {
+    public static void startService(final Context context, final boolean promptForPermissions,
+                                    @Nullable final String selectedIp) {
         Intent intent = new Intent(context, SmbService.class);
+        if (selectedIp != null) {
+            intent.putExtra(EXTRA_SELECTED_IP, selectedIp);
+        }
 
         var notifPerm = Permissions.from(context);
         if (!promptForPermissions) {
@@ -464,11 +506,23 @@ public class SmbService extends Service {
     private void updateUI() {
         boolean serverStarted = mServer != null && mServer.running();
         String netBiosAddress = UNC_PREFIX + getString(R.string.dns_name);
-        String textualIp = mLinkAddress != null ?
-                UNC_PREFIX + mLinkAddress.getAddress().getHostAddress() : "";
+        String textualIp = "";
+
+        if (isNetworkAvailable()) {
+            InetAddress ipToDisplay = mInetAddresses.get(0);
+            if (mSelectedIp != null) {
+                for (InetAddress addr : mInetAddresses) {
+                    if (Objects.equals(addr.getHostAddress(), mSelectedIp)) {
+                        ipToDisplay = addr;
+                        break;
+                    }
+                }
+            }
+            textualIp = UNC_PREFIX + ipToDisplay.getHostAddress();
+        }
 
         Status status = new Status(mRunning, serverStarted,
-                getUNCFormattedMDNSAddress(), netBiosAddress, textualIp);
+                getUNCFormattedMDNSAddress(), netBiosAddress, textualIp, mInetAddresses);
 
         var liveData = SmbServiceStatusLiveData.get();
         if (!status.equals(liveData.getValue())) {
