@@ -161,10 +161,16 @@ public class MainActivity extends AppCompatActivity {
             statusText.setText(R.string.status_server_off);
         } else if (!status.serverRunning()) {
             statusText.setText(R.string.message_server_waiting_network);
-        } else if (StringUtils.isBlank(status.mdnsAddress()) ||
+        } 
+        else if (StringUtils.isBlank(status.mdnsAddress()) ||
                 StringUtils.isBlank(status.ipAddress())) {
-            statusText.setText(R.string.message_server_running);
-        } else {
+                    statusText.setText(getStyledText(this,
+                    R.string.status_server_running,
+                    "",
+                    status.netBiosAddress(),
+                    status.ipAddress()));
+        } 
+        else {
             statusText.setText(getStyledText(this,
                     R.string.status_server_running,
                     status.mdnsAddress(),
