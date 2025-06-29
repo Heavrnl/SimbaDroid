@@ -25,7 +25,6 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
-import android.net.wifi.WifiManager;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
@@ -56,8 +55,8 @@ public class SmbService extends Service {
 
     private static final String NOTIFICATION_CHANNEL = SmbService.class.getName();
     private static final int NOTIFICATION_ID = 1;
-    private static final long WIFI_UNAVAILABLE_STARTUP_TIMEOUT_MS = 5 * 60 * 1000;
-    private static final long WIFI_UNAVAILABLE_TIMEOUT_MS = 20 * 60 * 1000;
+    private static final long NETWORK_UNAVAILABLE_STARTUP_TIMEOUT_MS = 5 * 60 * 1000;
+    private static final long NETWORK_UNAVAILABLE_TIMEOUT_MS = 20 * 60 * 1000;
     private static final String UNC_PREFIX = "\\\uFEFF\\";
     private static final String MDNS_SUFFIX = ".local";
 
@@ -74,11 +73,10 @@ public class SmbService extends Service {
 
     private JLANFileServer mServer;
     private PowerManager.WakeLock mWakeLock;
-    private WifiManager.WifiLock mWifiLock;
 
     private ConnectivityManager.NetworkCallback mNetCallback;
-    private Runnable mWifiTimeoutRunnable;
-    private long mWifiTimeoutMs = WIFI_UNAVAILABLE_STARTUP_TIMEOUT_MS;
+    private Runnable mNetworkTimeoutRunnable;
+    private long mNetworkTimeoutMs = NETWORK_UNAVAILABLE_STARTUP_TIMEOUT_MS;
 
     private NsdManager.RegistrationListener mNsdRegistrationListener;
     private String mMDNSHostname;
@@ -100,7 +98,7 @@ public class SmbService extends Service {
         if (!Objects.equals(mLinkAddress, address)) {
             mLinkAddress = address;
             if (address != null) {
-                mWifiTimeoutMs = WIFI_UNAVAILABLE_TIMEOUT_MS;
+                mNetworkTimeoutMs = NETWORK_UNAVAILABLE_TIMEOUT_MS;
             }
             updateServerState();
         }
@@ -117,7 +115,7 @@ public class SmbService extends Service {
         super.onCreate();
         createNotificationChannel();
         initLocks();
-        monitorWifi();
+        monitorNetwork();
     }
 
     @Nullable
@@ -185,8 +183,8 @@ public class SmbService extends Service {
     @Override
     public void onDestroy() {
         unregisterNsdService();
-        unmonitorWifi();
-        stopWifiTimeout();
+        unmonitorNetwork();
+        stopNetworkTimeout();
         updateUI();
         super.onDestroy();
     }
@@ -195,24 +193,24 @@ public class SmbService extends Service {
         return mRunning;
     }
 
-    public boolean isWifiAvailable() {
+    public boolean isNetworkAvailable() {
         return mLinkAddress != null;
     }
 
     private void updateServerState() {
         ThreadUtils.assertOnUiThread();
         updateUI();
-        if (isWifiAvailable()) {
-            stopWifiTimeout();
+        if (isNetworkAvailable()) {
+            stopNetworkTimeout();
         } else {
-            startWifiTimeout();
+            startNetworkTimeout();
         }
 
         if (mServer == null) {
             return;
         }
 
-        if (mRunning && isWifiAvailable()) {
+        if (mRunning && isNetworkAvailable()) {
             Log.d(LOGTAG, "Starting SMB server");
             mServer.setBindAddress(mLinkAddress);
             mServer.start();
@@ -222,7 +220,7 @@ public class SmbService extends Service {
         } else {
             Log.d(LOGTAG, "Stopping SMB server");
             mServer.stop();
-            if (mRunning && !isWifiAvailable()) {
+            if (mRunning && !isNetworkAvailable()) {
                 getSystemService(NotificationManager.class)
                         .notify(NOTIFICATION_ID, getServiceNotification());
             }
@@ -231,16 +229,16 @@ public class SmbService extends Service {
         updateUI();
     }
 
-    private void startWifiTimeout() {
-        stopWifiTimeout();
-        mWifiTimeoutRunnable = this::stop;
-        ThreadUtils.postDelayedToUiThread(mWifiTimeoutRunnable, mWifiTimeoutMs);
+    private void startNetworkTimeout() {
+        stopNetworkTimeout();
+        mNetworkTimeoutRunnable = this::stop;
+        ThreadUtils.postDelayedToUiThread(mNetworkTimeoutRunnable, mNetworkTimeoutMs);
     }
 
-    private void stopWifiTimeout() {
-        if (mWifiTimeoutRunnable != null) {
-            ThreadUtils.removeCallbacksFromUiThread(mWifiTimeoutRunnable);
-            mWifiTimeoutRunnable = null;
+    private void stopNetworkTimeout() {
+        if (mNetworkTimeoutRunnable != null) {
+            ThreadUtils.removeCallbacksFromUiThread(mNetworkTimeoutRunnable);
+            mNetworkTimeoutRunnable = null;
         }
     }
 
@@ -251,22 +249,18 @@ public class SmbService extends Service {
         PowerManager pwrMgr = getSystemService(PowerManager.class);
         mWakeLock = pwrMgr.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag);
 
-        WifiManager wifiMgr = getSystemService(WifiManager.class);
-        mWifiLock = wifiMgr.createWifiLock(WifiManager.WIFI_MODE_FULL, tag);
     }
 
     @SuppressLint("WakelockTimeout")
     private void acquireLocks() {
         mWakeLock.acquire();
-        mWifiLock.acquire();
     }
 
     private void releaseLocks() {
-        mWifiLock.release();
         mWakeLock.release();
     }
 
-    private void monitorWifi() {
+    private void monitorNetwork() {
         if (mNetCallback == null) {
             ConnectivityManager connMgr = getSystemService(ConnectivityManager.class);
             mNetCallback = new ConnectivityManager.NetworkCallback() {
@@ -293,13 +287,15 @@ public class SmbService extends Service {
             };
             connMgr.requestNetwork(
                     new NetworkRequest.Builder()
-                            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+                            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).build(),
                     mNetCallback
             );
         }
     }
 
-    private void unmonitorWifi() {
+    private void unmonitorNetwork() {
         if (mNetCallback != null) {
             ConnectivityManager connMgr = getSystemService(ConnectivityManager.class);
             mLinkAddress = null;
@@ -414,7 +410,7 @@ public class SmbService extends Service {
 
     private @Nullable NotificationCompat.Action getStopAction() {
         NotificationCompat.Action action = null;
-        if (isWifiAvailable()) {
+        if (isNetworkAvailable()) {
             Intent stopIntent = new Intent(this, SmbService.class)
                     .setAction(ACTION_STOP);
             PendingIntent pendingIntent = PendingIntent.getService(getApplicationContext(), 0,
@@ -427,9 +423,9 @@ public class SmbService extends Service {
     }
 
     private String getServiceNotificationText() {
-        return isWifiAvailable() ?
+        return isNetworkAvailable() ?
                 getString(R.string.message_server_running) :
-                getString(R.string.message_server_waiting_wifi);
+                getString(R.string.message_server_waiting_network);
     }
 
     /**
